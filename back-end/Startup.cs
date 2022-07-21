@@ -1,16 +1,20 @@
+using AutoMapper;
 using back_end.Filtros;
-using back_end.Repositorios;
+using back_end.Utilidades;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.HttpsPolicy;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
+using NetTopologySuite;
+using NetTopologySuite.Geometries;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -31,11 +35,39 @@ namespace back_end
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
-            services.AddResponseCaching();
-            services.AddSingleton<IRepositorio,RepositorioEnMemoria>();
-            services.AddTransient<MiFiltroDeAccion>();
+            services.AddAutoMapper(typeof(Startup));
 
+            services.AddSingleton(provider =>
+                new MapperConfiguration(config =>
+                {
+                    var geometryFactory = provider.GetRequiredService<GeometryFactory>();
+                    config.AddProfile(new AutomapperProfiles(geometryFactory));
+                }).CreateMapper());
+
+            services.AddSingleton<GeometryFactory>(NtsGeometryServices.Instance.CreateGeometryFactory(srid: 4326));
+
+            services.AddTransient<IAlmacenadorArchivos, AlmacenadorArchivoLocal>();
+
+            services.AddHttpContextAccessor();
+
+            services.AddDbContext<AplicationDbContext>(options =>
+            {
+                options.UseSqlServer(Configuration.GetConnectionString("defaultConnection"),
+                sqlServer => sqlServer.UseNetTopologySuite());
+            });
+
+
+            services.AddCors(options =>
+            {
+                var frontendURL = Configuration.GetValue<string>("frontend_url");
+                options.AddDefaultPolicy(builder =>
+                {
+                    builder.WithOrigins(frontendURL).AllowAnyMethod().AllowAnyHeader()
+                    .WithExposedHeaders(new string[] { "cantidadTotalRegistros" });
+                });
+            });
+
+            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
             services.AddControllers(options =>
             {
                 options.Filters.Add(typeof(FiltroDeExcepcion));
@@ -47,39 +79,8 @@ namespace back_end
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env, ILogger<Startup> logger)
+        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
         {
-
-            app.Use(async (context, next) =>
-            {
-                using (var swapStream = new MemoryStream())
-                {
-                    var respuestaOriginal = context.Response.Body;
-                    context.Response.Body = swapStream;
-
-                    await next.Invoke();
-
-                    swapStream.Seek(0, SeekOrigin.Begin);
-                    string respuesta = new StreamReader(swapStream).ReadToEnd();
-                    swapStream.Seek(0, SeekOrigin.Begin);
-
-                    await swapStream.CopyToAsync(respuestaOriginal);
-                    context.Response.Body = respuestaOriginal;
-
-                    logger.LogInformation(respuesta);
-                }
-
-            });
-
-            app.Map("/mapa1", (app) =>
-            {
-                app.Run(async context =>
-                {
-                    await context.Response.WriteAsync("Estoy intersentando el pipeline");
-                });
-
-            });
-
 
             if (env.IsDevelopment())
             {
@@ -90,9 +91,11 @@ namespace back_end
 
             app.UseHttpsRedirection();
 
+            app.UseStaticFiles();
+
             app.UseRouting();
 
-            app.UseResponseCaching();
+            app.UseCors();
 
             app.UseAuthentication();
 
